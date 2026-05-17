@@ -150,7 +150,6 @@ const PLUSHIES = [
 
 const commands = [
   new SlashCommandBuilder().setName('moderatenickname').setDescription('Moderate a user\'s nickname').addUserOption(o => o.setName('user').setDescription('User to moderate').setRequired(true)),
-  new SlashCommandBuilder().setName('balance').setDescription('Check your balance'),
   new SlashCommandBuilder().setName('bal').setDescription('Check your balance'),
   new SlashCommandBuilder().setName('balancetop').setDescription('Check top balances'),
   new SlashCommandBuilder().setName('curse').setDescription('Curse but not curse?'),
