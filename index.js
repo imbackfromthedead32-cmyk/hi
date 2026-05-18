@@ -30,6 +30,21 @@ const triviaSession = {};
 const userTriviaCorrect = {};
 const pendingSaves = new Set();
 
+const KEYS = {
+  JHD37Z: 500,
+  '8SJR02': 500,
+  RIZANDMIZ: 1000,
+  RMCONTROLV2: 2000,
+  CHOPPEDBOT: 750,
+  NEWPHONEWHODIS: 500,
+  SUBSCRIBE: 1000,
+  CHOPPEDCITY: 500,
+  YOURMOM: 500,
+  YOURDAD: 500,
+  FREEHUNDREDK: 100000,
+};
+const usedKeys = new Set();
+
 async function initDB() {
   if (!pool) return;
   await pool.query(`
@@ -150,10 +165,12 @@ const PLUSHIES = [
 
 const commands = [
   new SlashCommandBuilder().setName('moderatenickname').setDescription('Moderate a user\'s nickname').addUserOption(o => o.setName('user').setDescription('User to moderate').setRequired(true)),
-  new SlashCommandBuilder().setName('bal').setDescription('Check your balance'),
+  new SlashCommandBuilder().setName('balance').setDescription('Check your balance'),
   new SlashCommandBuilder().setName('balancetop').setDescription('Check top balances'),
-  new SlashCommandBuilder().setName('curse').setDescription('Curse but not curse?'),
+  new SlashCommandBuilder().setName('curse').setDescription('Curse someone... maybe').addUserOption(o => o.setName('target').setDescription('Who to curse').setRequired(true)),
   new SlashCommandBuilder().setName('redeem').setDescription('Streamlabs Redeems'),
+  new SlashCommandBuilder().setName('key').setDescription('Redeem a key for money').addStringOption(o => o.setName('code').setDescription('The key to redeem').setRequired(true)),
+  new SlashCommandBuilder().setName('swag').setDescription('Get the ultimate swag link'),
   new SlashCommandBuilder().setName('freerobux').setDescription('Definitely Real Free Robux'),
   new SlashCommandBuilder().setName('shush').setDescription('Shush'),
   new SlashCommandBuilder().setName('egg').setDescription('Show an artistic masterpiece of Rizzy as an egg'),
@@ -184,6 +201,13 @@ const commands = [
   new SlashCommandBuilder().setName('setup').setDescription('Set the bot command channel').addChannelOption(o => o.setName('channel').setDescription('Channel to use for bot commands').setRequired(true)),
   new SlashCommandBuilder().setName('enabledaily').setDescription('Toggle daily money for chatting'),
   new SlashCommandBuilder().setName('rememberance').setDescription('A message of appreciation'),
+  new SlashCommandBuilder().setName('giveaway').setDescription('Start a giveaway for a specific user (Admin only)')
+    .addUserOption(o => o.setName('winner').setDescription('Who wins the giveaway').setRequired(true))
+    .addIntegerOption(o => o.setName('amount').setDescription('Amount of money to give').setRequired(true).setMinValue(1))
+    .addStringOption(o => o.setName('prize').setDescription('Prize description (optional)').setRequired(false)),
+  new SlashCommandBuilder().setName('givemoney').setDescription('Give money to a user (Admin only)')
+    .addUserOption(o => o.setName('user').setDescription('User to give money to').setRequired(true))
+    .addIntegerOption(o => o.setName('amount').setDescription('Amount to give').setRequired(true).setMinValue(1)),
 ].map(c => c.toJSON());
 
 const app = express();
@@ -279,6 +303,7 @@ client.on('messageCreate', async (message) => {
           .setColor(0xFF0000)
           .setTitle('Reminder')
           .setDescription('Please do not ping, or reply with @mentions to, Admins and/or Founders (unless it\'s quite urgent)\nSee below if you are unsure on how to disable @mention upon reply\nAlso ensure you have also read **#rules**')
+          .setImage('https://cdn.discordapp.com/attachments/1247303459359690805/1505698534140416030/Screenshot_20260517_232815_Discord.jpg?ex=6a0b9289&is=6a0a4109&hm=5d174b83c024cc9c5789fab2251b5ba718d3a640f16cdc9e85045705063754dd&')
           .setFooter({ text: `Directed at ${message.author.username} | ${new Date().toLocaleDateString('en-GB')} ${new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}` });
         try { await message.channel.send({ embeds: [embed] }); } catch (_) {}
         break;
@@ -550,7 +575,36 @@ client.on('interactionCreate', async (interaction) => {
     return interaction.reply({ content: 'this bot was made by treecap originally. we all wish them happiness and good luck! yay!' });
   }
 
-  if (commandName === 'balance' || commandName === 'bal') {
+  if (commandName === 'giveaway') {
+    if (!interaction.member || !hasAdminRole(interaction.member)) return interaction.reply({ content: '😡😡😡', ephemeral: true });
+    const winner = interaction.options.getUser('winner');
+    const amount = interaction.options.getInteger('amount');
+    const prize = interaction.options.getString('prize') || `$${amount.toLocaleString()}`;
+    addBalance(winner.id, amount);
+    const embed = new EmbedBuilder()
+      .setColor(0xFFD700)
+      .setTitle('🎉 GIVEAWAY WINNER!')
+      .setDescription(`Congratulations to <@${winner.id}>!\n\n**Prize:** ${prize}\n**Amount:** $${amount.toLocaleString()} added to their balance!\n\nNew balance: **$${getBalance(winner.id).toLocaleString()}**`)
+      .setThumbnail(winner.displayAvatarURL())
+      .setTimestamp()
+      .setFooter({ text: `Hosted by ${interaction.user.username}` });
+    return interaction.reply({ embeds: [embed] });
+  }
+
+  if (commandName === 'givemoney') {
+    if (!interaction.member || !hasAdminRole(interaction.member)) return interaction.reply({ content: '😡😡😡', ephemeral: true });
+    const target = interaction.options.getUser('user');
+    const amount = interaction.options.getInteger('amount');
+    addBalance(target.id, amount);
+    const embed = new EmbedBuilder()
+      .setColor(0x22C55E)
+      .setTitle('💸 Money Given')
+      .setDescription(`**${interaction.user.username}** gave **$${amount.toLocaleString()}** to <@${target.id}>!\n\nNew balance: **$${getBalance(target.id).toLocaleString()}**`)
+      .setTimestamp();
+    return interaction.reply({ embeds: [embed] });
+  }
+
+  if (commandName === 'balance') {
     const embed = new EmbedBuilder().setColor(0x3B82F6).setTitle(`${interaction.user.username}'s Balance`).setDescription(`**$${getBalance(userId).toLocaleString()}**`).setThumbnail(interaction.user.displayAvatarURL());
     return interaction.reply({ embeds: [embed] });
   }
@@ -589,9 +643,9 @@ client.on('interactionCreate', async (interaction) => {
       .setColor(0x5865F2)
       .setTitle('Commands')
       .addFields(
-        { name: 'Admin', value: '`/moderatenickname` <user> — Moderate Nickname' },
-        { name: 'Economy', value: '`/balance` — Check Your Balance\n`/balancetop` — Check Top Balances\n`/shop` — Buy Plushies\n`/pet` — Pet your plushie for money\n`/enabledaily` — Toggle daily $1000 for chatting' },
-        { name: 'Fun', value: '`/curse` — Curse but not curse?\n`/redeem` — Streamlabs Redeems\n`/freerobux` — Definitely Real Free Robux\n`/shush` — Shush\n`/egg` — Show Rizzy as an egg\n`/nevergonnagiveyouup` — Rickroll\n`/bomb` — Blow up a bomb\n`/prankrizzy` — Pull the ultimate prank' },
+        { name: 'Admin', value: '`/moderatenickname` <user> — Moderate Nickname\n`/giveaway` <winner> <amount> — Start a giveaway\n`/givemoney` <user> <amount> — Give money to a user' },
+        { name: 'Economy', value: '`/balance` — Check Your Balance\n`/balancetop` — Check Top Balances\n`/shop` — Buy Plushies\n`/pet` — Pet your plushie for money\n`/enabledaily` — Toggle daily $1000 for chatting\n`/key` [code] — Redeem a key for money' },
+        { name: 'Fun', value: '`/curse` [user] — Curse someone... maybe\n`/redeem` — Streamlabs Redeems\n`/freerobux` — Definitely Real Free Robux\n`/shush` — Shush\n`/egg` — Show Rizzy as an egg\n`/nevergonnagiveyouup` — Rickroll\n`/bomb` — Blow up a bomb\n`/prankrizzy` — Pull the ultimate prank\n`/swag` — Get the ultimate swag link' },
         { name: 'Games', value: '`/slots` — Game Of Slots\n`/doubleornothing` [bet] — Double Or Nothing\n`/coinflip` — Flip a coin to win or lose $5\n`/dice` — Roll Dice\n`/scratch` — Scratch Ticket for $1\n`/beg` — Beg For Money\n`/rockpaperscissors` — Rock Paper Scissors\n`/trivia` — Answer trivia for money!\n`/gamble` — The magic egg awaits...\n`/lottery` — Buy a lotto ticket' },
         { name: 'Image', value: '`/lgbtifyguild` [guild id] — Guild logo with a hint of LGBT\n`/lgbtify` [user] — Profile pic with a hint of LGBT' },
         { name: 'Information', value: '`/help` — Show this message\n`/schedule` — Rizzy And Mizzy\'s stream schedule\n`/live` — Check if Rizzy And Mizzy are live\n`/info` — Bot information\n`/rememberance` — A message of appreciation' },
@@ -646,12 +700,68 @@ client.on('interactionCreate', async (interaction) => {
   }
 
   if (commandName === 'curse') {
-    const curses = ['Oh you absolute... *rascal*!', 'You unbelievable... *individual*!', 'Why you little... *person*!', 'You utter... *human*!'];
-    return interaction.reply({ content: curses[randomInt(0, curses.length - 1)] });
+    const target = interaction.options.getUser('target');
+    const won = Math.random() < 0.10;
+    if (won) {
+      addBalance(userId, 500);
+      return interaction.reply({ content: `You put candles around you as you closed your eyes. Nothing happens, and you wasted $2 buying candles. But you found an extra $2 in your couch. yay! you didn't lose much. Maybe there's a chance this would have a different outcome?\n\n*...wait. Something stirs. The curse on **${target.username}** actually worked??* **+$500!**\nBalance: **$${getBalance(userId).toLocaleString()}**` });
+    }
+    return interaction.reply({ content: `You put candles around you as you closed your eyes. Nothing happens, and you wasted $2 buying candles. But you found an extra $2 in your couch. yay! you didn't lose much. Maybe there's a chance this would have a different outcome?` });
   }
 
   if (commandName === 'redeem') {
-    return interaction.reply({ content: 'Check your Streamlabs account for available redeems!' });
+    const STREAMLABS_TOKEN = process.env.STREAMLABS_TOKEN;
+    if (!STREAMLABS_TOKEN) {
+      return interaction.reply({
+        content: 'Streamlabs is not connected yet. To link it, set the `STREAMLABS_TOKEN` environment variable in Railway using your Streamlabs API token from https://streamlabs.com/dashboard#/settings/api-settings',
+        ephemeral: true,
+      });
+    }
+    await interaction.deferReply({ ephemeral: true });
+    try {
+      const res = await axios.get('https://streamlabs.com/api/v1.0/donations', {
+        params: { access_token: STREAMLABS_TOKEN, limit: 5 },
+        timeout: 8000,
+      });
+      const donations = res.data.data;
+      if (!donations || donations.length === 0) {
+        return interaction.editReply({ content: 'No recent redeems or donations found on Streamlabs.' });
+      }
+      const lines = donations.map(d => `**${d.name}** — $${d.amount} ${d.currency} *(${d.message || 'no message'})*`).join('\n');
+      const embed = new EmbedBuilder().setColor(0x80F5D2).setTitle('Recent Streamlabs Donations').setDescription(lines).setFooter({ text: 'Powered by Streamlabs' });
+      return interaction.editReply({ embeds: [embed] });
+    } catch (e) {
+      return interaction.editReply({ content: `Failed to fetch Streamlabs data: ${e.message}` });
+    }
+  }
+
+  if (commandName === 'key') {
+    const code = interaction.options.getString('code').toUpperCase().trim();
+    if (usedKeys.has(code)) {
+      return interaction.reply({ content: 'That key has already been redeemed!', ephemeral: true });
+    }
+    const userRedeemedKeys = u._redeemedKeys || [];
+    if (userRedeemedKeys.includes(code)) {
+      return interaction.reply({ content: 'You have already redeemed that key!', ephemeral: true });
+    }
+    const prize = KEYS[code];
+    if (!prize) {
+      return interaction.reply({ content: 'That key is invalid or does not exist.', ephemeral: true });
+    }
+    usedKeys.add(code);
+    if (!u._redeemedKeys) u._redeemedKeys = [];
+    u._redeemedKeys.push(code);
+    addBalance(userId, prize);
+    const embed = new EmbedBuilder()
+      .setColor(0x22C55E)
+      .setTitle('Key Redeemed!')
+      .setDescription(`Key \`${code}\` accepted!\n\n**+$${prize.toLocaleString()}** added to your balance!\nNew balance: **$${getBalance(userId).toLocaleString()}**`)
+      .setFooter({ text: 'Keys are one-use only' });
+    return interaction.reply({ embeds: [embed] });
+  }
+
+  if (commandName === 'swag') {
+    return interaction.reply({ content: 'Want the ultimate swag? Look no further 👇\n[Get your swag here!](https://rizzy-and-mizzy.creator-spring.com/)\n*This website gives you the ultimate swag!*' });
   }
 
   if (commandName === 'freerobux') {
@@ -664,7 +774,7 @@ client.on('interactionCreate', async (interaction) => {
   }
 
   if (commandName === 'egg') {
-    const embed = new EmbedBuilder().setColor(0xFFD700).setTitle('Rizzy as an Egg').setDescription('```\n    ,--.\n   /    \\\n  | RIZZY|\n   \\    /\n    `--\'\n```\n*A true artistic masterpiece.*').setFooter({ text: 'Crafted with love and shell' });
+    const embed = new EmbedBuilder().setColor(0xFFD700).setTitle('Rizzy as an Egg').setDescription('*A true artistic masterpiece.*').setImage('https://i.imgur.com/UgVoGZH.png').setFooter({ text: 'Crafted with love and shell' });
     return interaction.reply({ embeds: [embed] });
   }
 
