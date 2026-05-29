@@ -8,6 +8,15 @@ const { Pool } = require('pg');
 const TOKEN = process.env.DISCORD_TOKEN || process.env.TOKEN || '';
 const CLIENT_ID = process.env.CLIENT_ID || '';
 const PROTECTED_ROLE_ID = '893877167627325460';
+
+const PROTECTED_USER_IDS = [
+  '463545427841515542',
+  '1234183450618232902',
+  '440148449820803072',
+  '688126550708977715',
+  '480132661998780418',
+  '756233069148766361'
+];
 const ADMIN_ROLE_IDS = ['722968925897228290', '722968975356723310'];
 const PORT = process.env.PORT || 3000;
 
@@ -298,7 +307,7 @@ client.on('messageCreate', async (message) => {
     if (message.type === 19 && message.mentions.repliedUser) mentionedUsers.push(message.mentions.repliedUser);
     for (const mentionedUser of mentionedUsers) {
       const member = await guild.members.fetch(mentionedUser.id).catch(() => null);
-      if (member && member.roles.cache.has(PROTECTED_ROLE_ID)) {
+      if (member && (member.roles.cache.has(PROTECTED_ROLE_ID) || PROTECTED_USER_IDS.includes(mentionedUser.id))) {
         const embed = new EmbedBuilder()
           .setColor(0xFF0000)
           .setTitle('Reminder')
@@ -391,6 +400,7 @@ async function fire420(isAM) {
   const channel = await findBotChannel();
   if (!channel) return;
   fourTwentyActive = true;
+  claimed420.clear();
   fourTwentyIsAM = isAM;
   fourTwentyChannelId = channel.id;
   const desc = isAM
@@ -418,16 +428,26 @@ async function fire420(isAM) {
   }, (4 * 60 + 20) * 60 * 1000);
 }
 
-async function findBotChannel() {
-  for (const [, guild] of client.guilds.cache) {
-    const settings = guildSettings[guild.id];
+async function findBotChannel(guild = null) {
+  const guilds = guild ? [guild] : [...client.guilds.cache.values()];
+
+  for (const g of guilds) {
+    const settings = guildSettings[g.id];
+
     if (settings && settings.commandChannelId) {
-      const ch = guild.channels.cache.get(settings.commandChannelId);
-      if (ch && ch.isTextBased()) return ch;
+      const configured = g.channels.cache.get(settings.commandChannelId);
+      if (configured && configured.isTextBased() && configured.permissionsFor(g.members.me)?.has('SendMessages')) {
+        return configured;
+      }
     }
-    const ch = guild.channels.cache.find(c => c.isTextBased() && c.permissionsFor(guild.members.me)?.has('SendMessages'));
-    if (ch) return ch;
+
+    const fallback = g.channels.cache.find(
+      c => c.isTextBased() && c.permissionsFor(g.members.me)?.has('SendMessages')
+    );
+
+    if (fallback) return fallback;
   }
+
   return null;
 }
 
