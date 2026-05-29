@@ -300,11 +300,18 @@ client.on('messageCreate', async (message) => {
 
   saveUser(userId);
 
-  if (message.mentions.users.size > 0 || message.type === 19) {
+  const isReplyMention = message.type === 19 && message.mentions.repliedUser;
+
+  if (message.mentions.users.size > 0 || isReplyMention) {
     const guild = message.guild;
     if (!guild) return;
+
     const mentionedUsers = [...message.mentions.users.values()];
-    if (message.type === 19 && message.mentions.repliedUser) mentionedUsers.push(message.mentions.repliedUser);
+
+    // Only count reply mentions if the reply actually pings the user
+    if (isReplyMention && message.mentions.users.has(message.mentions.repliedUser.id)) {
+      mentionedUsers.push(message.mentions.repliedUser);
+    }
     for (const mentionedUser of mentionedUsers) {
       const member = await guild.members.fetch(mentionedUser.id).catch(() => null);
       if (member && (member.roles.cache.has(PROTECTED_ROLE_ID) || PROTECTED_USER_IDS.includes(mentionedUser.id))) {
