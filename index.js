@@ -11,7 +11,6 @@ const PROTECTED_ROLE_ID = '893877167627325460';
 
 const PROTECTED_USER_IDS = [
   '463545427841515542',
-  '1234183450618232902',
   '440148449820803072',
   '688126550708977715',
   '480132661998780418',
@@ -19,6 +18,21 @@ const PROTECTED_USER_IDS = [
 ];
 const ADMIN_ROLE_IDS = ['722968925897228290', '722968975356723310'];
 const PORT = process.env.PORT || 3000;
+
+// --- YouTube notifier config ---
+const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY || '';
+const YOUTUBE_CHANNEL_HANDLE = '@rizzyandmizzy';
+const YOUTUBE_NOTIFY_GUILD_ID = '722946197769289759';
+const YOUTUBE_NOTIFY_CHANNEL_ID = '722965560849203210';
+const FORCE_NOTIFY_USER_IDS = ['463545427841515542', '1234183450618232902'];
+const YT_POLL_INTERVAL_MS = 3 * 60 * 1000;
+
+let ytState = {
+  channelId: null,
+  seenVideoIds: [],
+  premieres: {}, // videoId -> { messageId, channelId }
+};
+let ytStateDirty = false;
 
 const pool = process.env.DATABASE_URL
   ? new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } })
@@ -68,6 +82,12 @@ async function initDB() {
       settings JSONB NOT NULL DEFAULT '{}'
     )
   `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS bot_state (
+      key TEXT PRIMARY KEY,
+      value JSONB NOT NULL DEFAULT '{}'
+    )
+  `);
   const { rows } = await pool.query('SELECT user_id, data FROM user_data');
   for (const row of rows) {
     users[row.user_id] = row.data;
@@ -76,7 +96,28 @@ async function initDB() {
   for (const row of gs.rows) {
     guildSettings[row.guild_id] = row.settings;
   }
+  const ytRow = await pool.query("SELECT value FROM bot_state WHERE key = 'youtube'");
+  if (ytRow.rows.length > 0 && ytRow.rows[0].value) {
+    ytState = { ...ytState, ...ytRow.rows[0].value };
+  }
   console.log(`Loaded ${rows.length} users and ${gs.rows.length} guild settings from DB.`);
+}
+
+async function saveYtState() {
+  if (!pool) return;
+  if (ytStateDirty) return;
+  ytStateDirty = true;
+  setTimeout(async () => {
+    ytStateDirty = false;
+    try {
+      await pool.query(
+        "INSERT INTO bot_state (key, value) VALUES ('youtube', $1) ON CONFLICT (key) DO UPDATE SET value = $1",
+        [JSON.stringify(ytState)]
+      );
+    } catch (e) {
+      console.error('DB youtube state save error:', e.message);
+    }
+  }, 1000);
 }
 
 async function saveUser(userId) {
@@ -217,6 +258,9 @@ const commands = [
   new SlashCommandBuilder().setName('givemoney').setDescription('Give money to a user (Admin only)')
     .addUserOption(o => o.setName('user').setDescription('User to give money to').setRequired(true))
     .addIntegerOption(o => o.setName('amount').setDescription('Amount to give').setRequired(true).setMinValue(1)),
+  new SlashCommandBuilder().setName('forcenotify').setDescription('Force send a YouTube notification (restricted)')
+    .addStringOption(o => o.setName('type').setDescription('Type of notification').setRequired(true).addChoices({ name: 'Video/Short', value: 'video' }, { name: 'Live Stream', value: 'live' }))
+    .addStringOption(o => o.setName('link').setDescription('The YouTube link').setRequired(true)),
 ].map(c => c.toJSON());
 
 const app = express();
@@ -258,6 +302,7 @@ client.once('ready', async () => {
   } catch (e) { console.error('Failed to register commands:', e); }
   scheduleLottery();
   scheduleFourTwenty();
+  scheduleYoutubePoll();
 });
 
 function checkSetupChannel(interaction) {
@@ -435,6 +480,143 @@ async function fire420(isAM) {
   }, (4 * 60 + 20) * 60 * 1000);
 }
 
+// --- YouTube notifier ---
+
+async function resolveYoutubeChannelId() {
+  if (ytState.channelId) return ytState.channelId;
+  if (!YOUTUBE_API_KEY) return null;
+  try {
+    const handle = YOUTUBE_CHANNEL_HANDLE.replace(/^@/, '');
+    const res = await axios.get('https://www.googleapis.com/youtube/v3/channels', {
+      params: { part: 'id', forHandle: handle, key: YOUTUBE_API_KEY },
+      timeout: 10000,
+    });
+    const id = res.data.items && res.data.items[0] && res.data.items[0].id;
+    if (id) {
+      ytState.channelId = id;
+      saveYtState();
+    }
+    return id || null;
+  } catch (e) {
+    console.error('Failed to resolve YouTube channel id:', e.message);
+    return null;
+  }
+}
+
+async function getYoutubeNotifyChannel() {
+  try {
+    const guild = client.guilds.cache.get(YOUTUBE_NOTIFY_GUILD_ID) || await client.guilds.fetch(YOUTUBE_NOTIFY_GUILD_ID);
+    const channel = guild.channels.cache.get(YOUTUBE_NOTIFY_CHANNEL_ID) || await guild.channels.fetch(YOUTUBE_NOTIFY_CHANNEL_ID);
+    return channel;
+  } catch (e) {
+    console.error('Failed to fetch YouTube notify channel:', e.message);
+    return null;
+  }
+}
+
+async function pollYoutube() {
+  if (!YOUTUBE_API_KEY) return;
+  try {
+    const channelId = await resolveYoutubeChannelId();
+    if (!channelId) return;
+
+    const searchRes = await axios.get('https://www.googleapis.com/youtube/v3/search', {
+      params: {
+        part: 'snippet',
+        channelId,
+        order: 'date',
+        maxResults: 6,
+        type: 'video',
+        key: YOUTUBE_API_KEY,
+      },
+      timeout: 10000,
+    });
+    const items = searchRes.data.items || [];
+    const videoIds = items.map(i => i.id && i.id.videoId).filter(Boolean);
+
+    // Also re-check any pending premieres in case they aren't in the latest search page
+    for (const pendingId of Object.keys(ytState.premieres)) {
+      if (!videoIds.includes(pendingId)) videoIds.push(pendingId);
+    }
+    if (videoIds.length === 0) return;
+
+    const detailsRes = await axios.get('https://www.googleapis.com/youtube/v3/videos', {
+      params: {
+        part: 'snippet,liveStreamingDetails',
+        id: videoIds.join(','),
+        key: YOUTUBE_API_KEY,
+      },
+      timeout: 10000,
+    });
+    const videos = (detailsRes.data.items || []).sort((a, b) => {
+      return new Date(a.snippet.publishedAt) - new Date(b.snippet.publishedAt);
+    });
+
+    const notifyChannel = await getYoutubeNotifyChannel();
+    if (!notifyChannel) return;
+
+    for (const video of videos) {
+      const id = video.id;
+      const link = `https://www.youtube.com/watch?v=${id}`;
+      const liveStatus = video.snippet.liveBroadcastContent; // 'live' | 'upcoming' | 'none'
+      const alreadySeen = ytState.seenVideoIds.includes(id);
+      const pendingPremiere = ytState.premieres[id];
+
+      if (pendingPremiere && liveStatus === 'live') {
+        // Premiere has gone live — edit the original premiere message instead of posting a new one.
+        try {
+          const msg = await notifyChannel.messages.fetch(pendingPremiere.messageId);
+          await msg.edit(`Rizzy and Mizzy are now live! Well.. they should be. Check it out:\n${link}`);
+        } catch (e) {
+          console.error('Failed to edit premiere message:', e.message);
+        }
+        delete ytState.premieres[id];
+        if (!ytState.seenVideoIds.includes(id)) ytState.seenVideoIds.push(id);
+        saveYtState();
+        continue;
+      }
+
+      if (alreadySeen) continue;
+
+      if (liveStatus === 'upcoming') {
+        try {
+          const msg = await notifyChannel.send(`Rizzy and Mizzy has a premiere starting! Check it out:\n${link}`);
+          ytState.premieres[id] = { messageId: msg.id, channelId: notifyChannel.id };
+        } catch (e) {
+          console.error('Failed to send premiere message:', e.message);
+        }
+      } else if (liveStatus === 'live') {
+        // No premiere was posted for this stream — send the live-now failsafe.
+        try {
+          await notifyChannel.send(`(this is a failsafe incase the other notifier does not correctly work.) LIVE NOW! Rizzy and Mizzy are now live! Check it out:\n${link}`);
+        } catch (e) {
+          console.error('Failed to send live-now failsafe message:', e.message);
+        }
+      } else {
+        // Regular video or short
+        try {
+          await notifyChannel.send(`(this is a failsafe incase the other notifier does not correctly work.) A new video has been posted! Check it out:\n${link}`);
+        } catch (e) {
+          console.error('Failed to send video failsafe message:', e.message);
+        }
+      }
+
+      ytState.seenVideoIds.push(id);
+      if (ytState.seenVideoIds.length > 200) {
+        ytState.seenVideoIds = ytState.seenVideoIds.slice(-200);
+      }
+      saveYtState();
+    }
+  } catch (e) {
+    console.error('YouTube poll error:', e.message);
+  }
+}
+
+function scheduleYoutubePoll() {
+  pollYoutube();
+  setInterval(() => { pollYoutube(); }, YT_POLL_INTERVAL_MS);
+}
+
 async function findBotChannel(guild = null) {
   const guilds = guild ? [guild] : [...client.guilds.cache.values()];
 
@@ -591,7 +773,7 @@ client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
   const { commandName } = interaction;
-  const nonSetupCommands = ['setup', 'ping', 'cmds', 'help', 'info', 'rememberance'];
+  const nonSetupCommands = ['setup', 'ping', 'cmds', 'help', 'info', 'rememberance', 'forcenotify'];
   if (!nonSetupCommands.includes(commandName) && !checkSetupChannel(interaction)) return;
 
   if (commandName === 'ping') {
@@ -600,6 +782,27 @@ client.on('interactionCreate', async (interaction) => {
 
   if (commandName === 'rememberance') {
     return interaction.reply({ content: 'this bot was made by treecap originally. we all wish them happiness and good luck! yay!' });
+  }
+
+  if (commandName === 'forcenotify') {
+    if (!FORCE_NOTIFY_USER_IDS.includes(userId)) {
+      return interaction.reply({ content: '😡😡😡', ephemeral: true });
+    }
+    const type = interaction.options.getString('type');
+    const link = interaction.options.getString('link');
+    const notifyChannel = await getYoutubeNotifyChannel();
+    if (!notifyChannel) {
+      return interaction.reply({ content: 'Could not find the notification channel.', ephemeral: true });
+    }
+    const content = type === 'live'
+      ? `(this is a failsafe incase the other notifier does not correctly work.) LIVE NOW! Rizzy and Mizzy are now live! Check it out:\n${link}`
+      : `(this is a failsafe incase the other notifier does not correctly work.) A new video has been posted! Check it out:\n${link}`;
+    try {
+      await notifyChannel.send(content);
+      return interaction.reply({ content: 'Notification sent!', ephemeral: true });
+    } catch (e) {
+      return interaction.reply({ content: `Failed to send notification: ${e.message}`, ephemeral: true });
+    }
   }
 
   if (commandName === 'giveaway') {
@@ -1100,3 +1303,4 @@ client.login(TOKEN).catch(err => {
   console.error('Failed to login:', err.message);
   process.exit(1);
 });
+
