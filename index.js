@@ -154,7 +154,6 @@ function getUser(id) {
     users[id] = {
       balance: 0,
       plushies: [],
-      achievements: [],
       messageCount: 0,
       lastGamble: 0,
       lastPet: {},
@@ -174,36 +173,6 @@ function addBalance(id, amount) {
 
 function getBalance(id) {
   return getUser(id).balance;
-}
-
-const ACHIEVEMENTS = {
-  FIRST_MESSAGE: { id: 'FIRST_MESSAGE', name: 'They Can Talk!', desc: 'Send a message' },
-  BOT_FIRST_USE: { id: 'BOT_FIRST_USE', name: 'Awoken!', desc: 'Use the bot for the first time' },
-  YAPPER: { id: 'YAPPER', name: 'Yapper', desc: 'Send 100 messages' },
-  WAKE_IDLE: { id: 'WAKE_IDLE', name: 'Did you just wake them up!?', desc: 'Ping someone who is offline/idle' },
-  BROKE: { id: 'BROKE', name: 'Broke Bot', desc: 'Reach $0 balance' },
-  RICH: { id: 'RICH', name: 'Big Bucks', desc: 'Reach $10,000 balance' },
-  LOTTO_WIN: { id: 'LOTTO_WIN', name: 'Jackpot!', desc: 'Win the lottery' },
-  TRIVIA_MASTER: { id: 'TRIVIA_MASTER', name: 'Trivia Master', desc: 'Answer 10 trivia questions correctly' },
-  PET_LOVER: { id: 'PET_LOVER', name: 'Pet Lover', desc: 'Pet your plushie 10 times' },
-  GAMBLER: { id: 'GAMBLER', name: 'Risky Business', desc: 'Use /gamble for the first time' },
-  FOURTWENTY: { id: 'FOURTWENTY', name: '420 Enthusiast', desc: 'Claim the 420 coins event' },
-};
-
-async function unlockAchievement(u, achId, channel, userId) {
-  if (u.achievements.includes(achId)) return;
-  u.achievements.push(achId);
-  saveUser(userId);
-  const ach = ACHIEVEMENTS[achId];
-  if (!ach || !channel) return;
-  const now = new Date();
-  const timeStr = `${String(now.getDate()).padStart(2,'0')}/${String(now.getMonth()+1).padStart(2,'0')}/${now.getFullYear()} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
-  const embed = new EmbedBuilder()
-    .setColor(0xF5A623)
-    .setTitle('Achievement Unlocked!')
-    .setDescription(`You unlocked the achievement *${ach.name}*\n*(${ach.desc})*\n\n*(Achievements are only obtainable once)* | ${timeStr}`)
-    .setFooter({ text: 'Achievement Unlocked!' });
-  try { await channel.send({ content: 'Achievement Unlocked!', embeds: [embed] }); } catch (_) {}
 }
 
 const PLUSHIES = [
@@ -261,6 +230,7 @@ const commands = [
   new SlashCommandBuilder().setName('forcenotify').setDescription('Force send a YouTube notification (restricted)')
     .addStringOption(o => o.setName('type').setDescription('Type of notification').setRequired(true).addChoices({ name: 'Video/Short', value: 'video' }, { name: 'Live Stream', value: 'live' }))
     .addStringOption(o => o.setName('link').setDescription('The YouTube link').setRequired(true)),
+  new SlashCommandBuilder().setName('deletelastmsg').setDescription('Delete the bot\'s last message in the YouTube notification channel (restricted)'),
 ].map(c => c.toJSON());
 
 const app = express();
@@ -336,13 +306,6 @@ client.on('messageCreate', async (message) => {
     }
   }
 
-  if (!u.achievements.includes('FIRST_MESSAGE')) {
-    await unlockAchievement(u, 'FIRST_MESSAGE', message.channel, userId);
-  }
-  if (u.messageCount >= 100 && !u.achievements.includes('YAPPER')) {
-    await unlockAchievement(u, 'YAPPER', message.channel, userId);
-  }
-
   saveUser(userId);
 
   const isReplyMention = message.type === 19 && message.mentions.repliedUser;
@@ -372,21 +335,6 @@ client.on('messageCreate', async (message) => {
     }
   }
 
-  if (message.mentions.users.size > 0) {
-    const guild = message.guild;
-    if (guild) {
-      for (const [, mentionedUser] of message.mentions.users) {
-        const member = await guild.members.fetch(mentionedUser.id).catch(() => null);
-        if (member) {
-          const presence = member.presence;
-          const status = presence ? presence.status : 'offline';
-          if ((status === 'idle' || status === 'offline') && !u.achievements.includes('WAKE_IDLE')) {
-            await unlockAchievement(u, 'WAKE_IDLE', message.channel, userId);
-          }
-        }
-      }
-    }
-  }
 });
 
 function scheduleLottery() {
@@ -433,7 +381,6 @@ async function drawLottery(channel) {
   const embed = new EmbedBuilder().setColor(0xFFD700).setTimestamp();
   if (winnerId) {
     addBalance(winnerId, prize);
-    await unlockAchievement(getUser(winnerId), 'LOTTO_WIN', channel, winnerId);
     embed.setTitle('Lottery Results!').setDescription(`Congratulations <@${winnerId}>! You won the lottery!\n\n**Prize:** $${prize.toLocaleString()}`);
   } else {
     embed.setTitle('Lottery Results').setDescription(`No winner this round! The $${prize.toLocaleString()} prize has been rolled over.\n\nBetter luck next time!`);
@@ -514,11 +461,26 @@ async function getYoutubeNotifyChannel() {
   }
 }
 
+// Returns duration in seconds, or null if it couldn't be parsed (caller should
+// treat null conservatively, e.g. as "too long", rather than assuming 0).
+function parseIso8601DurationSeconds(duration) {
+  if (!duration) return null;
+  const match = duration.match(/^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/);
+  if (!match) return null;
+  const days = parseInt(match[1] || '0', 10);
+  const hours = parseInt(match[2] || '0', 10);
+  const minutes = parseInt(match[3] || '0', 10);
+  const seconds = parseInt(match[4] || '0', 10);
+  return days * 86400 + hours * 3600 + minutes * 60 + seconds;
+}
+
 async function pollYoutube() {
   if (!YOUTUBE_API_KEY) return;
   try {
     const channelId = await resolveYoutubeChannelId();
     if (!channelId) return;
+
+    const isFirstRun = ytState.seenVideoIds.length === 0 && Object.keys(ytState.premieres).length === 0;
 
     const searchRes = await axios.get('https://www.googleapis.com/youtube/v3/search', {
       params: {
@@ -542,7 +504,7 @@ async function pollYoutube() {
 
     const detailsRes = await axios.get('https://www.googleapis.com/youtube/v3/videos', {
       params: {
-        part: 'snippet,liveStreamingDetails',
+        part: 'snippet,liveStreamingDetails,contentDetails',
         id: videoIds.join(','),
         key: YOUTUBE_API_KEY,
       },
@@ -551,6 +513,17 @@ async function pollYoutube() {
     const videos = (detailsRes.data.items || []).sort((a, b) => {
       return new Date(a.snippet.publishedAt) - new Date(b.snippet.publishedAt);
     });
+
+    if (isFirstRun) {
+      // First time the notifier has ever run for this channel — seed the seen list
+      // with whatever is currently posted instead of blasting out a notification
+      // for every recent video/short/stream found in this initial batch.
+      for (const video of videos) {
+        if (!ytState.seenVideoIds.includes(video.id)) ytState.seenVideoIds.push(video.id);
+      }
+      saveYtState();
+      return;
+    }
 
     const notifyChannel = await getYoutubeNotifyChannel();
     if (!notifyChannel) return;
@@ -566,7 +539,7 @@ async function pollYoutube() {
         // Premiere has gone live — edit the original premiere message instead of posting a new one.
         try {
           const msg = await notifyChannel.messages.fetch(pendingPremiere.messageId);
-          await msg.edit(`Rizzy and Mizzy are now live! Well.. they should be. Check it out:\n${link}`);
+          await msg.edit(`Rizzy and Mizzy are now live! Check it out:\n${link}`);
         } catch (e) {
           console.error('Failed to edit premiere message:', e.message);
         }
@@ -593,11 +566,20 @@ async function pollYoutube() {
           console.error('Failed to send live-now failsafe message:', e.message);
         }
       } else {
-        // Regular video or short
-        try {
-          await notifyChannel.send(`(this is a failsafe incase the other notifier does not correctly work.) A new video has been posted! Check it out:\n${link}`);
-        } catch (e) {
-          console.error('Failed to send video failsafe message:', e.message);
+        // Regular video or short — but a completed livestream/premiere also shows up here
+        // with liveBroadcastContent 'none', so filter those out using liveStreamingDetails
+        // and duration (anything a past livestream, or over 45 minutes, is not a normal video/short).
+        const wasLivestream = !!(video.liveStreamingDetails && video.liveStreamingDetails.actualStartTime);
+        const durationSeconds = parseIso8601DurationSeconds(video.contentDetails && video.contentDetails.duration);
+        // Treat an unparseable duration conservatively as "too long" rather than assuming it's short.
+        const tooLong = durationSeconds === null || durationSeconds > 45 * 60;
+
+        if (!wasLivestream && !tooLong) {
+          try {
+            await notifyChannel.send(`(this is a failsafe incase the other notifier does not correctly work.) A new video has been posted! Check it out:\n${link}`);
+          } catch (e) {
+            console.error('Failed to send video failsafe message:', e.message);
+          }
         }
       }
 
@@ -646,7 +628,6 @@ client.on('interactionCreate', async (interaction) => {
 
   if (!u.botUsed) {
     u.botUsed = true;
-    if (interaction.channel) await unlockAchievement(u, 'BOT_FIRST_USE', interaction.channel, userId);
     saveUser(userId);
   }
 
@@ -658,7 +639,6 @@ client.on('interactionCreate', async (interaction) => {
       if (claimed420.has(userId)) return interaction.reply({ content: 'You already claimed your 420 coins!', ephemeral: true });
       claimed420.add(userId);
       addBalance(userId, 420);
-      await unlockAchievement(u, 'FOURTWENTY', interaction.channel, userId);
       const msg = fourTwentyIsAM
         ? 'You ran into the haunted house and put them in a bag. You can still feel the shivers of the house.. or maybe because it\'s cold **+420 coins!**'
         : 'You claimed your **420 coins!** Enjoy!';
@@ -676,9 +656,6 @@ client.on('interactionCreate', async (interaction) => {
       if (isCorrect) {
         addBalance(userId, reward);
         userTriviaCorrect[userId] = (userTriviaCorrect[userId] || 0) + 1;
-        if (userTriviaCorrect[userId] >= 10 && !u.achievements.includes('TRIVIA_MASTER')) {
-          await unlockAchievement(u, 'TRIVIA_MASTER', interaction.channel, userId);
-        }
         const embed = new EmbedBuilder().setColor(0x22C55E).setTitle('Correct!').setDescription(`**${session.correct}** was right!\n\nYou earned **$${reward.toLocaleString()}**!\nNew balance: **$${getBalance(userId).toLocaleString()}**`);
         return interaction.update({ embeds: [embed], components: [] });
       } else {
@@ -773,7 +750,7 @@ client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
   const { commandName } = interaction;
-  const nonSetupCommands = ['setup', 'ping', 'cmds', 'help', 'info', 'rememberance', 'forcenotify'];
+  const nonSetupCommands = ['setup', 'ping', 'cmds', 'help', 'info', 'rememberance', 'forcenotify', 'deletelastmsg'];
   if (!nonSetupCommands.includes(commandName) && !checkSetupChannel(interaction)) return;
 
   if (commandName === 'ping') {
@@ -802,6 +779,27 @@ client.on('interactionCreate', async (interaction) => {
       return interaction.reply({ content: 'Notification sent!', ephemeral: true });
     } catch (e) {
       return interaction.reply({ content: `Failed to send notification: ${e.message}`, ephemeral: true });
+    }
+  }
+
+  if (commandName === 'deletelastmsg') {
+    if (!FORCE_NOTIFY_USER_IDS.includes(userId)) {
+      return interaction.reply({ content: '😡😡😡', ephemeral: true });
+    }
+    const notifyChannel = await getYoutubeNotifyChannel();
+    if (!notifyChannel) {
+      return interaction.reply({ content: 'Could not find the notification channel.', ephemeral: true });
+    }
+    try {
+      const recentMessages = await notifyChannel.messages.fetch({ limit: 20 });
+      const lastBotMessage = recentMessages.find(m => m.author.id === client.user.id);
+      if (!lastBotMessage) {
+        return interaction.reply({ content: 'No recent message from me found in that channel.', ephemeral: true });
+      }
+      await lastBotMessage.delete();
+      return interaction.reply({ content: 'Deleted my last message in that channel.', ephemeral: true });
+    } catch (e) {
+      return interaction.reply({ content: `Failed to delete message: ${e.message}`, ephemeral: true });
     }
   }
 
@@ -882,6 +880,7 @@ client.on('interactionCreate', async (interaction) => {
         { name: 'Other', value: '`/ping` — Checks if the bot is working' },
         { name: 'Tools', value: '`/qrcode` [text or link] — QR Code Generator' },
         { name: 'Setup', value: '`/setup` — Set bot command channel (Admin only)' },
+        { name: 'YouTube Notifier', value: '`/forcenotify` <type> <link> — Manually send a video/live notification (restricted)\n`/deletelastmsg` — Delete the bot\'s last message in the notification channel (restricted)' },
       )
       .setFooter({ text: 'RMControl Bot' });
     return interaction.reply({ embeds: [embed] });
@@ -1251,7 +1250,6 @@ client.on('interactionCreate', async (interaction) => {
     const plushie = PLUSHIES.find(p => p.id === pid);
     addBalance(userId, plushie.petReward);
     u._petCount = (u._petCount || 0) + 1;
-    if (u._petCount >= 10) await unlockAchievement(u, 'PET_LOVER', interaction.channel, userId);
     saveUser(userId);
     const embed = new EmbedBuilder()
       .setColor(0xEC4899)
@@ -1271,7 +1269,6 @@ client.on('interactionCreate', async (interaction) => {
     }
     u.lastGamble = Date.now();
     saveUser(userId);
-    await unlockAchievement(u, 'GAMBLER', interaction.channel, userId);
     const embed = new EmbedBuilder()
       .setColor(0x8B5CF6)
       .setTitle('The Magic Egg\'s Domain')
