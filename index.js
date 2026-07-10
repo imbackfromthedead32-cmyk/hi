@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, Partials, REST, Routes, SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, AttachmentBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, Partials, REST, Routes, SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, AttachmentBuilder, ChannelType } = require('discord.js');
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -231,6 +231,9 @@ const commands = [
     .addStringOption(o => o.setName('type').setDescription('Type of notification').setRequired(true).addChoices({ name: 'Video/Short', value: 'video' }, { name: 'Live Stream', value: 'live' }))
     .addStringOption(o => o.setName('link').setDescription('The YouTube link').setRequired(true)),
   new SlashCommandBuilder().setName('deletelastmsg').setDescription('Delete the bot\'s last message in the YouTube notification channel (restricted)'),
+  new SlashCommandBuilder().setName('talk').setDescription('Make the bot send a message in a channel (restricted)')
+    .addChannelOption(o => o.setName('channel').setDescription('Channel to send the message in').setRequired(true).addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement))
+    .addStringOption(o => o.setName('message').setDescription('The message to send').setRequired(true)),
 ].map(c => c.toJSON());
 
 const app = express();
@@ -750,7 +753,7 @@ client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
   const { commandName } = interaction;
-  const nonSetupCommands = ['setup', 'ping', 'cmds', 'help', 'info', 'rememberance', 'forcenotify', 'deletelastmsg'];
+  const nonSetupCommands = ['setup', 'ping', 'cmds', 'help', 'info', 'rememberance', 'forcenotify', 'deletelastmsg', 'talk'];
   if (!nonSetupCommands.includes(commandName) && !checkSetupChannel(interaction)) return;
 
   if (commandName === 'ping') {
@@ -800,6 +803,26 @@ client.on('interactionCreate', async (interaction) => {
       return interaction.reply({ content: 'Deleted my last message in that channel.', ephemeral: true });
     } catch (e) {
       return interaction.reply({ content: `Failed to delete message: ${e.message}`, ephemeral: true });
+    }
+  }
+
+  if (commandName === 'talk') {
+    if (!FORCE_NOTIFY_USER_IDS.includes(userId)) {
+      return interaction.reply({ content: '😡😡😡', ephemeral: true });
+    }
+    const targetChannel = interaction.options.getChannel('channel');
+    const talkMessage = interaction.options.getString('message');
+    const bannedWords = ['job', 'employment', 'grass'];
+    const lowerMsg = talkMessage.toLowerCase();
+    if (bannedWords.some(w => lowerMsg.includes(w))) {
+      return interaction.reply({ content: `I cannot say such foul things such as j*b, empl*yment, or gr*ss. Shame on <@${userId}>!`, ephemeral: false });
+    }
+    try {
+      const channel = await client.channels.fetch(targetChannel.id);
+      await channel.send(talkMessage);
+      return interaction.reply({ content: `Sent your message in <#${targetChannel.id}>.`, ephemeral: true });
+    } catch (e) {
+      return interaction.reply({ content: `Failed to send message: ${e.message}`, ephemeral: true });
     }
   }
 
@@ -881,6 +904,7 @@ client.on('interactionCreate', async (interaction) => {
         { name: 'Tools', value: '`/qrcode` [text or link] — QR Code Generator' },
         { name: 'Setup', value: '`/setup` — Set bot command channel (Admin only)' },
         { name: 'YouTube Notifier', value: '`/forcenotify` <type> <link> — Manually send a video/live notification (restricted)\n`/deletelastmsg` — Delete the bot\'s last message in the notification channel (restricted)' },
+        { name: 'Restricted', value: '`/talk` <channel> <message> — Make the bot say something in a channel (restricted)' },
       )
       .setFooter({ text: 'RMControl Bot' });
     return interaction.reply({ embeds: [embed] });
