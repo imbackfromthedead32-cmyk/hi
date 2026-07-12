@@ -1325,3 +1325,11 @@ client.login(TOKEN).catch(err => {
   process.exit(1);
 });
 
+const setDND = require('./dnd');
+
+client.once('ready', () => {
+  console.log(`Logged in as ${client.user.tag}`);
+
+  setDND(client);
+});
+
