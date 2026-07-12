@@ -5,8 +5,8 @@ module.exports = (client) => {
     status: 'dnd',
     activities: [
       {
-        name: 'your mom',
-        type: ActivityType.Rizzing
+        name: 'rizzing your mom',
+        type: ActivityType.Competing
       }
     ]
   });
