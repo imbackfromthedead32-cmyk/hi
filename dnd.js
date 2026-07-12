@@ -6,7 +6,7 @@ module.exports = (client) => {
     activities: [
       {
         name: 'your mom',
-        type: ActivityType.Streaming
+        type: ActivityType.Rizzing
       }
     ]
   });
