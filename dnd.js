@@ -5,8 +5,8 @@ module.exports = (client) => {
     status: 'dnd',
     activities: [
       {
-        name: 'over the server',
-        type: ActivityType.Watching
+        name: 'your mom',
+        type: ActivityType.Streaming
       }
     ]
   });
