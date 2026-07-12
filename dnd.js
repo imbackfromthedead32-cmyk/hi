@@ -1,14 +1,8 @@
-const { Client, GatewayIntentBits, ActivityType } = require('discord.js');
+const { ActivityType } = require('discord.js');
 
-const client = new Client({
-  intents: [GatewayIntentBits.Guilds]
-});
-
-client.once('ready', () => {
-  console.log(`Logged in as ${client.user.tag}`);
-
+module.exports = (client) => {
   client.user.setPresence({
-    status: 'dnd', // online, idle, dnd, invisible
+    status: 'dnd',
     activities: [
       {
         name: 'over the server',
@@ -16,5 +10,4 @@ client.once('ready', () => {
       }
     ]
   });
-});
-;
+};
