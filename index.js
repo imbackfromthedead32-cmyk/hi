@@ -438,17 +438,56 @@ async function resolveYoutubeChannelId() {
   try {
     const handle = YOUTUBE_CHANNEL_HANDLE.replace(/^@/, '');
     const res = await axios.get('https://www.googleapis.com/youtube/v3/channels', {
-      params: { part: 'id', forHandle: handle, key: YOUTUBE_API_KEY },
+      params: { part: 'contentDetails', forHandle: handle, key: YOUTUBE_API_KEY },
       timeout: 10000,
     });
-    const id = res.data.items && res.data.items[0] && res.data.items[0].id;
+    const item = res.data.items && res.data.items[0];
+    const id = item && item.id;
+    const uploadsPlaylistId = item && item.contentDetails && item.contentDetails.relatedPlaylists && item.contentDetails.relatedPlaylists.uploads;
     if (id) {
       ytState.channelId = id;
+      if (uploadsPlaylistId) ytState.uploadsPlaylistId = uploadsPlaylistId;
       saveYtState();
     }
     return id || null;
   } catch (e) {
     console.error('Failed to resolve YouTube channel id:', e.message);
+    return null;
+  }
+}
+
+// Resolves (and caches) the channel's "uploads" playlist ID, which lets the poller use the
+// cheap playlistItems.list endpoint (1 quota unit) instead of search.list (100 quota units).
+// Polling search.list every YT_POLL_INTERVAL_MS blows through YouTube's default 10,000/day
+// quota in a few hours and starts returning HTTP 429 for the rest of the day.
+//
+// NOTE: this must not simply delegate to resolveYoutubeChannelId() — for deployments that
+// already had a persisted ytState.channelId from before this fix, that function short-circuits
+// on the cached channelId and never runs the channels.list lookup that fills in
+// uploadsPlaylistId, which would leave polling permanently stuck. So when uploadsPlaylistId is
+// missing, always issue a fresh channels.list call directly (by id if we have one, otherwise by
+// handle) rather than relying on resolveYoutubeChannelId()'s cache check.
+async function resolveUploadsPlaylistId() {
+  if (ytState.uploadsPlaylistId) return ytState.uploadsPlaylistId;
+  if (!YOUTUBE_API_KEY) return null;
+  try {
+    const params = ytState.channelId
+      ? { part: 'contentDetails', id: ytState.channelId, key: YOUTUBE_API_KEY }
+      : { part: 'contentDetails', forHandle: YOUTUBE_CHANNEL_HANDLE.replace(/^@/, ''), key: YOUTUBE_API_KEY };
+    const res = await axios.get('https://www.googleapis.com/youtube/v3/channels', {
+      params,
+      timeout: 10000,
+    });
+    const item = res.data.items && res.data.items[0];
+    const uploadsPlaylistId = item && item.contentDetails && item.contentDetails.relatedPlaylists && item.contentDetails.relatedPlaylists.uploads;
+    if (item && item.id && !ytState.channelId) ytState.channelId = item.id;
+    if (uploadsPlaylistId) {
+      ytState.uploadsPlaylistId = uploadsPlaylistId;
+      saveYtState();
+    }
+    return uploadsPlaylistId || null;
+  } catch (e) {
+    console.error('Failed to resolve YouTube uploads playlist id:', e.message);
     return null;
   }
 }
@@ -482,22 +521,25 @@ async function pollYoutube() {
   try {
     const channelId = await resolveYoutubeChannelId();
     if (!channelId) return;
+    const uploadsPlaylistId = await resolveUploadsPlaylistId();
+    if (!uploadsPlaylistId) return;
 
     const isFirstRun = ytState.seenVideoIds.length === 0 && Object.keys(ytState.premieres).length === 0;
 
-    const searchRes = await axios.get('https://www.googleapis.com/youtube/v3/search', {
+    // playlistItems.list costs 1 quota unit per call vs. search.list's 100 units — using
+    // search.list here (checked every YT_POLL_INTERVAL_MS) is what exhausted the daily
+    // quota and caused pollYoutube() to fail with HTTP 429 for the rest of the day.
+    const playlistRes = await axios.get('https://www.googleapis.com/youtube/v3/playlistItems', {
       params: {
         part: 'snippet',
-        channelId,
-        order: 'date',
+        playlistId: uploadsPlaylistId,
         maxResults: 6,
-        type: 'video',
         key: YOUTUBE_API_KEY,
       },
       timeout: 10000,
     });
-    const items = searchRes.data.items || [];
-    const videoIds = items.map(i => i.id && i.id.videoId).filter(Boolean);
+    const items = playlistRes.data.items || [];
+    const videoIds = items.map(i => i.snippet && i.snippet.resourceId && i.snippet.resourceId.videoId).filter(Boolean);
 
     // Also re-check any pending premieres in case they aren't in the latest search page
     for (const pendingId of Object.keys(ytState.premieres)) {
@@ -1332,4 +1374,3 @@ client.once('ready', () => {
 
   setDND(client);
 });
-
