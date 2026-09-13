@@ -584,7 +584,7 @@ async function pollYoutube() {
         // Premiere has gone live — edit the original premiere message instead of posting a new one.
         try {
           const msg = await notifyChannel.messages.fetch(pendingPremiere.messageId);
-          await msg.edit(`Rizzy and Mizzy are now live! Check it out:\n${link}`);
+          await msg.edit(`@everyone Rizzy and Mizzy are now live! Check it out:\n${link}`);
         } catch (e) {
           console.error('Failed to edit premiere message:', e.message);
         }
@@ -598,7 +598,7 @@ async function pollYoutube() {
 
       if (liveStatus === 'upcoming') {
         try {
-          const msg = await notifyChannel.send(`Rizzy and Mizzy has a premiere starting! Check it out:\n${link}`);
+          const msg = await notifyChannel.send(`@everyone Rizzy and Mizzy has a premiere starting! Check it out:\n${link}`);
           ytState.premieres[id] = { messageId: msg.id, channelId: notifyChannel.id };
         } catch (e) {
           console.error('Failed to send premiere message:', e.message);
@@ -606,7 +606,7 @@ async function pollYoutube() {
       } else if (liveStatus === 'live') {
         // No premiere was posted for this stream — send the live-now failsafe.
         try {
-          await notifyChannel.send(`(this is a failsafe incase the other notifier does not correctly work.) LIVE NOW! Rizzy and Mizzy are now live! Check it out:\n${link}`);
+          await notifyChannel.send(`@everyone LIVE NOW! Rizzy and Mizzy are now live! Check it out:\n${link}`);
         } catch (e) {
           console.error('Failed to send live-now failsafe message:', e.message);
         }
@@ -621,7 +621,7 @@ async function pollYoutube() {
 
         if (!wasLivestream && !tooLong) {
           try {
-            await notifyChannel.send(`(this is a failsafe incase the other notifier does not correctly work.) A new video has been posted! Check it out:\n${link}`);
+            await notifyChannel.send(`@everyone A new video has been posted! Check it out:\n${link}`);
           } catch (e) {
             console.error('Failed to send video failsafe message:', e.message);
           }
